@@ -1,8 +1,9 @@
 .venv*/
-logs/*.log
-logs/*.pid
-results/*.jsonl
-results/*.json
+state/*.log
+state/*.pid
+state/*.json
+bench/results/*.jsonl
+bench/results/*.json
 .DS_Store
 __pycache__/
 *.pyc

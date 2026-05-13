@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 VENV="$ROOT/.venv-vllm-metal"
-LOG_DIR="$ROOT/logs"
-PID_FILE="$LOG_DIR/vllm-metal.pid"
-LOG_FILE="$LOG_DIR/vllm-metal.log"
+STATE_DIR="$ROOT/state"
+PID_FILE="$STATE_DIR/vllm-metal.pid"
+LOG_FILE="$STATE_DIR/vllm-metal.log"
 MODEL="${1:-${MODEL:-Qwen/Qwen3-0.6B}}"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
@@ -16,7 +16,7 @@ if [[ ! -d "$VENV" ]]; then
   exit 1
 fi
 
-mkdir -p "$LOG_DIR"
+mkdir -p "$STATE_DIR"
 
 if [[ -f "$PID_FILE" ]]; then
   PID="$(cat "$PID_FILE")"

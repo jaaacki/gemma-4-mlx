@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PID_FILE="$ROOT/logs/vllm-metal.pid"
+ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+PID_FILE="$ROOT/state/vllm-metal.pid"
 
 if [[ ! -f "$PID_FILE" ]]; then
   echo "vLLM Metal is not tracked as running."

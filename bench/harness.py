@@ -201,7 +201,7 @@ async def main() -> None:
     parser.add_argument("--stream", action="store_true")
     parser.add_argument("--prompt", default="Explain KV cache in local LLM serving in three concise bullets.")
     parser.add_argument("--prompt-repeat", type=int, default=1, help="Repeat prompt text to create larger prefill workloads.")
-    parser.add_argument("--pid-file", default="logs/vllm-metal.pid")
+    parser.add_argument("--pid-file", default="state/vllm-metal.pid")
     parser.add_argument("--jsonl", default=None, help="Write raw per-request results as JSONL.")
     args = parser.parse_args()
 

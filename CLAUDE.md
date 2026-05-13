@@ -4,55 +4,95 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## Purpose
 
-Evaluation workspace for vLLM Metal on Apple Silicon. The goal is to decide whether this stack is viable for Gemma 4 edge serving. Treat results as provisional — only the OpenAI-compatible API with a Qwen smoke-test model has been verified. Gemma 4, MTP/speculative decoding, paged attention, and KV-cache compression are **not yet validated** here, so do not assert they work without booting a fresh test in this workspace.
+Evaluation workspace for vLLM Metal on Apple Silicon — a candidate path for limited-capacity production inference serving on a Mac. The eval is for the owner's company; the rig is being shaped to look like a real production endpoint, not a developer toy.
 
-## Architecture
+Current state, validated paths, known limits, and outstanding work are captured in the most recent `HANDOFF-*.md` at the repo root. Read that file first before assuming anything about what's been verified.
 
-Two-process layout, deliberate and load-bearing:
+## Architecture (four layers, interface-isolated)
 
-1. **Native vLLM Metal server on the host** (`127.0.0.1:8000`). Must run natively because Docker Desktop on macOS cannot expose Metal/MLX GPU to Linux containers. Lives in `.venv-vllm-metal/` (Python 3.12, vLLM 0.20.1, vllm_metal 0.2.0, MLX 0.31.2). Managed via `start_vllm_metal.sh` / `stop_vllm_metal.sh` / `status_vllm_metal.sh`, which write `logs/vllm-metal.pid` and `logs/vllm-metal.log`.
-2. **Docker nginx proxy** (`127.0.0.1:18080` → `host.docker.internal:8000`). Exists only so callers get a containerized 5-digit endpoint; it does no inference. Defined by `Dockerfile` + `nginx.conf` + `docker-compose.yml` and managed via `start_proxy_container.sh` / `stop_proxy_container.sh`.
+```
+clients ─► edge (nginx)  ─►  engine (vllm-metal)  ◄─  operator (scripts/, forge later)
+                                  │
+                                  ▼
+                            state/, profiles/, ~/.cache/huggingface/
+```
 
-`bench_openai.py` is the evaluation harness — async OpenAI client, optional streaming for TTFT, samples server RSS via the PID file from `start_vllm_metal.sh`, and writes per-request JSONL plus a summary JSON with p50/p95/p99 latency and throughput.
+- **Engine**: `vllm` + `vllm_metal` Python subprocess, single model loaded, OpenAI-compatible HTTP on `127.0.0.1:8000`. Cannot be rewritten — vLLM IS Python.
+- **Edge**: nginx in Docker (`deploy/nginx/`). External listener, auth/TLS/rate-limit boundary (user-owned config). Forwards to engine on localhost. Optional but the default deployment shape.
+- **Operator**: today, shell scripts in `scripts/` that wrap `vllm serve` with the right per-model flags. In progress: `cmd/forge/` Go binary that reads `deploy/profiles/*.toml`, supervises the subprocess, exposes status JSON for the edge's health probe.
+- **Bench**: `bench/harness.py` — async OpenAI client, TTFT + throughput + tree-wide RSS sampling, JSONL + summary JSON output.
+
+Layers communicate via interfaces (HTTP, signals, files on disk) — no shared code. Each can be replaced independently.
+
+## Repo layout
+
+```
+scripts/         operator shell wrappers (will be replaced by forge binary)
+deploy/nginx/    Dockerfile, docker-compose.yml, nginx.conf for the edge
+deploy/profiles/ (future) per-model TOML profiles
+bench/           Python harness; results land in bench/results/ (gitignored)
+state/           runtime artifacts: PID file, engine log, future status JSON (gitignored)
+.venv-vllm-metal/   engine venv (gitignored, do not touch)
+```
 
 ## Common commands
 
-Start / stop / status of the native server (env vars override defaults):
+Boot a configured profile (handles parsers, prefix cache, context length):
 
 ```bash
-./start_vllm_metal.sh                                 # default smoke model (Qwen/Qwen3-0.6B)
-MAX_MODEL_LEN=8192 ./start_vllm_metal.sh some/model   # positional arg or MODEL= overrides model
-VLLM_METAL_USE_PAGED_ATTENTION=1 ./start_vllm_metal.sh some/model
-SPECULATIVE_CONFIG='{"method":"mtp","num_speculative_tokens":1}' ./start_vllm_metal.sh some/model
-EXTRA_VLLM_ARGS='--trust-remote-code' ./start_vllm_metal.sh some/model
-./status_vllm_metal.sh
-./stop_vllm_metal.sh
+./scripts/use_qwen36.sh
+./scripts/use_gemma4.sh
 ```
 
-Docker proxy (start the native server first):
+Lifecycle:
 
 ```bash
-./start_proxy_container.sh                # exposes 127.0.0.1:18080
-HOST_PORT=19090 ./start_proxy_container.sh
-./stop_proxy_container.sh
+./scripts/status_engine.sh
+./scripts/stop_engine.sh
 ```
 
-Benchmark (always activate the venv first; this is the same env that runs the server, but the client just needs `openai` + `psutil`):
+Edge:
+
+```bash
+./scripts/edge_up.sh             # nginx on 127.0.0.1:18080 → host:8000
+./scripts/edge_down.sh
+HOST_PORT=19090 ./scripts/edge_up.sh
+```
+
+Lower-level engine boot (bypasses use_*.sh wrappers, for one-offs):
+
+```bash
+MAX_MODEL_LEN=8192 ./scripts/start_engine.sh some/model-id
+EXTRA_VLLM_ARGS='--enable-prefix-caching --tool-call-parser X' \
+  ./scripts/start_engine.sh some/model-id
+```
+
+Benchmark (engine must be running):
 
 ```bash
 source .venv-vllm-metal/bin/activate
-python bench_openai.py --model Qwen/Qwen3-0.6B --requests 20 --warmup 2 --concurrency 4 --max-tokens 128 \
-  --jsonl results/qwen-smoke-c4.jsonl
-python bench_openai.py --model Qwen/Qwen3-0.6B --stream --requests 20 --concurrency 4 --max-tokens 128
-python bench_openai.py --model Qwen/Qwen3-0.6B --stream --concurrency 4 --prompt-repeat 200  # larger prefill
+python -m bench.harness --model <id> --stream --requests 20 --concurrency 4 \
+  --max-tokens 128 --jsonl bench/results/<name>.jsonl
 ```
 
-Pass `--base-url http://127.0.0.1:18080/v1` to benchmark through the Docker proxy instead of the native port.
+Pass `--base-url http://127.0.0.1:18080/v1` to bench through the edge instead of the engine direct.
 
 ## Conventions that matter
 
-- **PID/log files in `logs/`** are how the scripts coordinate. `start_vllm_metal.sh` refuses to start if `logs/vllm-metal.pid` points to a live process. `bench_openai.py --pid-file` defaults to the same file so it can record server RSS deltas.
-- **No tests, lint, or build step.** This is a scripts + harness workspace, not a package. Don't invent CI commands.
-- **`results/` and `logs/`** are gitignored. JSONL benchmark output is meant to be regenerated, not committed.
-- **Evaluation matrix** (from README): sweep `concurrency ∈ {1,2,4,8,16}`, `max_model_len ∈ {8192, 32768, 65536}`, `max_tokens ∈ {128, 512, 1024}`, `prompt_repeat ∈ {1, 50, 200}`, `stream ∈ {false, true}`. Record boot success, load time from the log, latency percentiles, TTFT, throughput, RSS, and macOS memory pressure. If macOS swaps, mark the config overloaded even if requests complete.
-- **Gemma 4 status**: not yet booted here. The README spells out the intended sequence — find MLX-compatible Gemma 4 IDs, boot smallest at `MAX_MODEL_LEN=8192`, smoke + bench, then retry with paged attention, and only attempt `SPECULATIVE_CONFIG` after a clean Gemma 4 boot.
+- **Scripts compute project root via `git rev-parse --show-toplevel`.** Safe to run from any subdirectory.
+- **`state/` and `bench/results/` are gitignored.** Don't commit JSONL/summary output.
+- **One model serves at a time.** Model swap = stop + start, ~30–80s including Metal kernel warmup. No hot-swap in vllm-metal 0.2.0.
+- **Per-model parsers required for tool-using clients** (opencode, etc.): each model family has its own tool-call grammar (`gemma4`, `qwen3_xml`) and reasoning markers (`gemma4`, `qwen3`). The `use_*.sh` wrappers bake in the correct combo per model. If you boot via `start_engine.sh` directly, you own setting these via `EXTRA_VLLM_ARGS`.
+- **Prefix caching must be explicitly enabled for hybrid-attention models** (Qwen 3.6's DeltaNet+Gated, Gemma 4's heterogeneous heads) — vLLM auto-disables it for these architectures. `use_*.sh` already passes `--enable-prefix-caching`. Without it, every turn pays full prefill.
+- **No tests, lint, or build step.** Scripts + harness workspace, not a package. Don't invent CI commands.
+- **Evaluation matrix** (per HANDOFF): sweep `concurrency ∈ {1,2,4,8,16}`, `max_model_len ∈ {8192, 32768, 65536, 131072}`, `max_tokens ∈ {128, 512, 1024}`, `prompt_repeat ∈ {1, 50, 200}`, `stream ∈ {false, true}`. Record p50/p95/p99 latency, TTFT, throughput, RSS, macOS swap pressure. If swap grows, mark the config overloaded even if requests complete.
+
+## In flight (do not assume these exist yet)
+
+- `cmd/forge/` (Go) operator binary. Replaces `scripts/use_*.sh` with `forge boot <profile>` reading TOML.
+- `deploy/profiles/*.toml` per-model declarative config.
+- `deploy/launchd/*.plist` for boot-time supervision.
+- `cmd/tailer/` access-log → SQLite observability.
+- `bench/pyproject.toml` + `uv` migration to eliminate venv friction.
+
+Stage 1 (this layout) is complete; later stages are sequenced and tracked in the most recent HANDOFF.

@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-PID_FILE="$ROOT/logs/vllm-metal.pid"
-LOG_FILE="$ROOT/logs/vllm-metal.log"
+ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
+PID_FILE="$ROOT/state/vllm-metal.pid"
+LOG_FILE="$ROOT/state/vllm-metal.log"
 HOST="${HOST:-127.0.0.1}"
 PORT="${PORT:-8000}"
 
