@@ -9,7 +9,7 @@ arch_family = "qwen3"
 [server]
 host = "127.0.0.1"
 port = 8000
-max_model_len = 131072
+max_model_len = 262144
 
 [parsers]
 tool_call = "qwen3_xml"

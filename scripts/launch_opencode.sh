@@ -23,7 +23,7 @@ PROFILE="${PROFILE:-qwen36}"
 PROJECT="${PROJECT:-$PWD}"
 # Per-request output cap for opencode. Big enough that thinking-enabled models
 # (Qwen 3.6) can think AND answer in the same response. Override via env var.
-OUTPUT_TOKENS="${OUTPUT_TOKENS:-32768}"
+OUTPUT_TOKENS="${OUTPUT_TOKENS:-65536}"
 OPENCODE_ARGS=()
 
 # Arg parsing: -C DIR / --profile NAME / -- pass-through. Bare first positional = profile.
