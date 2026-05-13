@@ -44,7 +44,18 @@ Makefile          forge build + lifecycle wrappers
 
 ## Common commands
 
-`forge` is canonical. The Makefile wraps the common subcommands.
+The user-facing entry points are the launch scripts under `scripts/launch_*.sh`. Each one ensures the engine is up with the right profile (boots if down, refuses if a different model is loaded), then exec's the named harness. Prefer these over manual forge invocations unless you're debugging the operator itself.
+
+```bash
+./scripts/launch_opencode.sh           # opencode TUI, default profile qwen36
+./scripts/launch_opencode.sh gemma4    # different profile
+./scripts/launch_aider.sh              # aider REPL
+./scripts/launch_bench.sh              # synthetic load harness
+./scripts/launch_bench.sh qwen36 -- --requests 50 --concurrency 8
+./scripts/ensure_engine.sh qwen36      # just guarantee readiness; no harness exec
+```
+
+Operator layer (when stepping below launch scripts):
 
 ```bash
 make build                       # builds bin/forge and bin/tailer

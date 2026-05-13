@@ -22,6 +22,46 @@ clients  ─►  edge (nginx, optional)  ─►  engine (vllm-metal)  ◄─  op
 
 `forge` is the canonical operator. `make boot-qwen` / `make boot-gemma` are thin Makefile wrappers around `forge boot <profile>` for muscle-memory parity with the older script flow.
 
+## Drive it
+
+One-liner per coding harness. Each script ensures the engine is up with the right profile, then launches the harness — no manual boot, no manual env vars.
+
+| Harness | Command | Requires |
+|---|---|---|
+| **opencode** (Claude-Code-like TUI) | `./scripts/launch_opencode.sh` | `npm install -g opencode-ai` + `~/.config/opencode/opencode.json` (see launchd README) |
+| **aider** (REPL with diffs) | `./scripts/launch_aider.sh` | `pip install aider-install && aider-install` |
+| **bench** (synthetic load) | `./scripts/launch_bench.sh` | `brew install uv` |
+| **raw HTTP** (anything OpenAI-compatible) | `curl http://127.0.0.1:8000/v1/...` | nothing |
+
+All four launch scripts accept the same shape:
+
+```bash
+./scripts/launch_<harness>.sh [PROFILE] [-- harness-args...]
+
+# Default profile is qwen36 (Qwen 3.6 35B-A3B 4-bit MLX).
+./scripts/launch_opencode.sh
+./scripts/launch_opencode.sh gemma4
+./scripts/launch_opencode.sh qwen36 -- run "explain bench/harness.py"
+
+# Bench accepts the harness's flags after --
+./scripts/launch_bench.sh qwen36 -- --requests 50 --concurrency 8 --max-tokens 256
+```
+
+Each script delegates engine readiness to `scripts/ensure_engine.sh`:
+
+1. Builds `bin/forge` if missing.
+2. If the engine is down → boots the requested profile.
+3. If the engine is up with a different model → refuses with a `forge swap` hint (won't surprise an active session).
+4. Polls `/v1/models` until HTTP-ready (max 3 min).
+
+You can call `ensure_engine.sh` directly too — it's how CI or external supervisors would drive the rig:
+
+```bash
+./scripts/ensure_engine.sh qwen36 && <your-tool-against-:8000>
+```
+
+To change which model a harness defaults to, edit the corresponding `deploy/profiles/*.toml` (the launch scripts read the model ID from the TOML, no hardcoding).
+
 ## Layout
 
 ```
@@ -100,7 +140,9 @@ Legacy shell scripts under `scripts/` (`use_qwen36.sh`, `use_gemma4.sh`, `start_
 
 ## Benchmark
 
-The bench harness is the `gemma-4-bench` package, declared at the repo-root `pyproject.toml`. Use `uv` from the repo root — no `--project` flag needed.
+`./scripts/launch_bench.sh` is the convenience wrapper — it ensures the engine is up, reads the model ID from the profile, and runs the harness with sensible defaults. Use that for most cases.
+
+Manual invocation (when you need to script around the bench yourself):
 
 One-time setup:
 
