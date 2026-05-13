@@ -1,0 +1,22 @@
+# Gemma 4 26B-A4B 4-bit MLX — full coding-agent config.
+# Mirrors scripts/use_gemma4.sh.
+
+[model]
+id = "mlx-community/gemma-4-26b-a4b-it-4bit"
+display_name = "Gemma 4 26B-A4B 4-bit"
+arch_family = "gemma4"
+
+[server]
+host = "127.0.0.1"
+port = 8000
+max_model_len = 131072
+
+[parsers]
+tool_call = "gemma4"
+reasoning = "gemma4"
+
+[cache]
+prefix_caching = true
+
+[extra]
+flags = ["--enable-auto-tool-choice"]

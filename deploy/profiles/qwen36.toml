@@ -1,0 +1,22 @@
+# Qwen 3.6 35B-A3B 4-bit MLX — full coding-agent config.
+# Mirrors scripts/use_qwen36.sh.
+
+[model]
+id = "mlx-community/Qwen3.6-35B-A3B-4bit"
+display_name = "Qwen 3.6 35B-A3B 4-bit"
+arch_family = "qwen3"
+
+[server]
+host = "127.0.0.1"
+port = 8000
+max_model_len = 131072
+
+[parsers]
+tool_call = "qwen3_xml"
+reasoning = "qwen3"
+
+[cache]
+prefix_caching = true
+
+[extra]
+flags = ["--enable-auto-tool-choice"]

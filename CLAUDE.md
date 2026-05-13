@@ -67,11 +67,11 @@ EXTRA_VLLM_ARGS='--enable-prefix-caching --tool-call-parser X' \
   ./scripts/start_engine.sh some/model-id
 ```
 
-Benchmark (engine must be running):
+Benchmark (engine must be running; bench is `uv`-managed, separate from the engine venv):
 
 ```bash
-source .venv-vllm-metal/bin/activate
-python -m bench.harness --model <id> --stream --requests 20 --concurrency 4 \
+# one-time: brew install uv && uv sync --project bench
+uv run --project bench python -m bench.harness --model <id> --stream --requests 20 --concurrency 4 \
   --max-tokens 128 --jsonl bench/results/<name>.jsonl
 ```
 

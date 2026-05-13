@@ -74,9 +74,17 @@ curl -fsS http://127.0.0.1:8000/v1/models | python3 -m json.tool
 
 ## Benchmark
 
+The bench harness is a separate `uv`-managed package so it doesn't share the engine's venv. One-time setup:
+
 ```bash
-source .venv-vllm-metal/bin/activate    # while uv migration is pending
-python -m bench.harness \
+brew install uv                  # or `pipx install uv`
+uv sync --project bench          # creates bench/.venv with openai + psutil
+```
+
+Then run from the repo root:
+
+```bash
+uv run --project bench python -m bench.harness \
   --model mlx-community/Qwen3.6-35B-A3B-4bit \
   --stream --requests 20 --warmup 2 --concurrency 4 --max-tokens 128 \
   --jsonl bench/results/qwen-stream-c4.jsonl

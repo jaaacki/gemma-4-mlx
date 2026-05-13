@@ -3,4 +3,11 @@ services:
     build: .
     ports:
       - "127.0.0.1:${HOST_PORT:-18080}:8080"
+    volumes:
+      # Persist nginx access log to host at <repo>/state/nginx-access.log
+      # (compose file lives at deploy/nginx/, so ../../state == repo root state/).
+      # The Go tailer reads state/nginx-access.log by default; the nginx
+      # config (nginx.conf) writes to that exact filename inside the container,
+      # which lands at <repo>/state/nginx-access.log on the host via this bind.
+      - ../../state:/var/log/nginx
     restart: unless-stopped

@@ -1,4 +1,7 @@
 .venv*/
+**/.venv/
+.uv-cache/
+bin/
 state/*.log
 state/*.pid
 state/*.json

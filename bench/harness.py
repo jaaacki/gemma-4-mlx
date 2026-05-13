@@ -224,5 +224,9 @@ async def main() -> None:
     print(json.dumps(summarize(args, results, wall_s, before, after), indent=2))
 
 
-if __name__ == "__main__":
+def main_sync() -> None:
     asyncio.run(main())
+
+
+if __name__ == "__main__":
+    main_sync()
