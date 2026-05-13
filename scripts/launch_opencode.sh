@@ -21,6 +21,9 @@ ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
 PROFILE="${PROFILE:-qwen36}"
 PROJECT="${PROJECT:-$PWD}"
+# Per-request output cap for opencode. Big enough that thinking-enabled models
+# (Qwen 3.6) can think AND answer in the same response. Override via env var.
+OUTPUT_TOKENS="${OUTPUT_TOKENS:-32768}"
 OPENCODE_ARGS=()
 
 # Arg parsing: -C DIR / --profile NAME / -- pass-through. Bare first positional = profile.
@@ -68,14 +71,16 @@ fi
 # Sync opencode's default model to the profile we just booted.
 OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
 if [[ -f "$OPENCODE_CONFIG" ]]; then
-  python3 - "$ROOT/deploy/profiles/${PROFILE}.toml" "$OPENCODE_CONFIG" <<'PY'
+  python3 - "$ROOT/deploy/profiles/${PROFILE}.toml" "$OPENCODE_CONFIG" "$OUTPUT_TOKENS" <<'PY'
 import json, os, sys, tempfile, tomllib
 
-profile_path, opencode_path = sys.argv[1], sys.argv[2]
+profile_path, opencode_path, output_tokens_str = sys.argv[1], sys.argv[2], sys.argv[3]
 with open(profile_path, "rb") as f:
     profile = tomllib.load(f)
 model_id = profile["model"]["id"]
 display_name = profile["model"].get("display_name", model_id)
+context_len = int(profile["server"]["max_model_len"])
+output_tokens = int(output_tokens_str)
 target = f"vllm-local/{model_id}"
 
 with open(opencode_path) as f:
@@ -86,20 +91,30 @@ provider.setdefault("npm", "@ai-sdk/openai-compatible")
 provider.setdefault("name", "Local vLLM (Metal)")
 provider.setdefault("options", {"baseURL": "http://127.0.0.1:8000/v1"})
 models = provider.setdefault("models", {})
-if model_id not in models:
-    models[model_id] = {"name": display_name}
 
-if cfg.get("model") == target and model_id in models:
-    sys.exit(0)
+# Ensure model entry exists and carries a sensible limit. limit.context follows
+# the profile's max_model_len; limit.output is the per-request cap that needs
+# to be roomy enough for thinking-mode models (Qwen 3.6) to think AND answer.
+entry = models.setdefault(model_id, {"name": display_name})
+entry.setdefault("name", display_name)
+limit = entry.setdefault("limit", {})
+limit["context"] = context_len
+limit["output"] = output_tokens
 
+changed = cfg.get("model") != target  # at minimum the default-model field
 cfg["model"] = target
+
 d = os.path.dirname(opencode_path) or "."
 with tempfile.NamedTemporaryFile("w", dir=d, delete=False, suffix=".tmp") as tf:
     json.dump(cfg, tf, indent=2)
     tf.write("\n")
     tmp = tf.name
 os.replace(tmp, opencode_path)
-print(f"launch_opencode: opencode default model set to {target}", file=sys.stderr)
+print(
+    f"launch_opencode: synced opencode config "
+    f"(model={target}, limit.context={context_len}, limit.output={output_tokens})",
+    file=sys.stderr,
+)
 PY
 fi
 
