@@ -49,11 +49,14 @@ The user-facing entry points are the launch scripts under `scripts/launch_*.sh`.
 ```bash
 ./scripts/launch_opencode.sh           # opencode TUI, default profile qwen36
 ./scripts/launch_opencode.sh gemma4    # different profile
+./scripts/launch_claude_code.sh        # Anthropic's Claude Code against the local engine
 ./scripts/launch_aider.sh              # aider REPL
 ./scripts/launch_bench.sh              # synthetic load harness
 ./scripts/launch_bench.sh qwen36 -- --requests 50 --concurrency 8
 ./scripts/ensure_engine.sh qwen36      # just guarantee readiness; no harness exec
 ```
+
+Claude Code path uses vLLM 0.20.x's native `/v1/messages` endpoint — no LiteLLM proxy. The profile declares `served_model_name` aliases (`claude-sonnet-4-5`, `claude-3-5-sonnet-20241022`, etc.) so Claude Code's default model strings route to whatever model is loaded.
 
 Operator layer (when stepping below launch scripts):
 

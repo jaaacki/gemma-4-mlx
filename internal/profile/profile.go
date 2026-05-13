@@ -41,11 +41,16 @@ type ModelConfig struct {
 }
 
 // ServerConfig describes the listen address and context window. MaxModelLen
-// maps to vLLM's --max-model-len flag.
+// maps to vLLM's --max-model-len flag. ServedModelName, when non-empty,
+// maps to vLLM's --served-model-name (space-separated tokens). The first
+// token becomes the canonical name in responses; the rest are aliases that
+// route to the same model — used to make Anthropic clients (Claude Code)
+// happy without changing the underlying weights.
 type ServerConfig struct {
-	Host        string `toml:"host"`
-	Port        int    `toml:"port"`
-	MaxModelLen int    `toml:"max_model_len"`
+	Host            string   `toml:"host"`
+	Port            int      `toml:"port"`
+	MaxModelLen     int      `toml:"max_model_len"`
+	ServedModelName []string `toml:"served_model_name"`
 }
 
 // ParsersConfig configures the chat-template parsers. Both fields must be
@@ -170,6 +175,16 @@ func (p *Profile) VLLMArgs() []string {
 		"--host", p.Server.Host,
 		"--port", strconv.Itoa(p.Server.Port),
 		"--max-model-len", strconv.Itoa(p.Server.MaxModelLen),
+	}
+
+	if len(p.Server.ServedModelName) > 0 {
+		if _, dup := extraSet["--served-model-name"]; !dup {
+			// vLLM's --served-model-name takes space-separated tokens as a
+			// single flag with multiple following positional values. Append
+			// the flag once, then each alias as its own argv element.
+			args = append(args, "--served-model-name")
+			args = append(args, p.Server.ServedModelName...)
+		}
 	}
 
 	if p.Parsers.ToolCall != "" {

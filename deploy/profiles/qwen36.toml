@@ -10,6 +10,18 @@ arch_family = "qwen3"
 host = "127.0.0.1"
 port = 8000
 max_model_len = 262144
+# vLLM --served-model-name aliases. The first token becomes the canonical name
+# in API responses; the rest are aliases that route to the same model. Aliases
+# exist so Anthropic-shape clients (Claude Code) can send their default model
+# names (claude-sonnet-4-5 etc.) without us serving a different model.
+served_model_name = [
+  "qwen36",
+  "mlx-community/Qwen3.6-35B-A3B-4bit",
+  "claude-sonnet-4-5",
+  "claude-3-5-sonnet-20241022",
+  "claude-3-5-haiku-20241022",
+  "claude-opus-4",
+]
 
 [parsers]
 tool_call = "qwen3_xml"

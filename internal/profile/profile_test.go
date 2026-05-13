@@ -239,6 +239,42 @@ func TestVLLMArgs(t *testing.T) {
 			},
 		},
 		{
+			name: "served_model_name aliases (Anthropic / Claude Code support)",
+			p: &Profile{
+				Model:  ModelConfig{ID: "mlx-community/Qwen3.6-35B-A3B-4bit"},
+				Server: ServerConfig{
+					Host: "127.0.0.1", Port: 8000, MaxModelLen: 8192,
+					ServedModelName: []string{"qwen36", "claude-sonnet-4-5", "claude-3-5-haiku-20241022"},
+				},
+			},
+			want: []string{
+				"serve", "mlx-community/Qwen3.6-35B-A3B-4bit",
+				"--host", "127.0.0.1",
+				"--port", "8000",
+				"--max-model-len", "8192",
+				"--served-model-name", "qwen36", "claude-sonnet-4-5", "claude-3-5-haiku-20241022",
+			},
+		},
+		{
+			name: "extra repeats served-model-name — dedup wins on Extra",
+			p: &Profile{
+				Model: ModelConfig{ID: "m"},
+				Server: ServerConfig{
+					Host: "h", Port: 1, MaxModelLen: 1,
+					ServedModelName: []string{"alias-a", "alias-b"},
+				},
+				Extra: ExtraConfig{Flags: []string{"--served-model-name", "user-alias"}},
+			},
+			want: []string{
+				"serve", "m",
+				"--host", "h",
+				"--port", "1",
+				"--max-model-len", "1",
+				// synthesized --served-model-name suppressed because Extra has it
+				"--served-model-name", "user-alias",
+			},
+		},
+		{
 			name: "extra repeats synthesized flag — dedup wins on Extra",
 			p: &Profile{
 				Model:   ModelConfig{ID: "m"},

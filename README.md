@@ -28,10 +28,12 @@ One-liner per coding harness. Each script ensures the engine is up with the righ
 
 | Harness | Command | Requires |
 |---|---|---|
-| **opencode** (Claude-Code-like TUI) | `./scripts/launch_opencode.sh` | `npm install -g opencode-ai` + `~/.config/opencode/opencode.json` (see launchd README) |
+| **opencode** (TUI, Claude-Code-like) | `./scripts/launch_opencode.sh` | `npm install -g opencode-ai` |
+| **Claude Code** (Anthropic's official CLI) | `./scripts/launch_claude_code.sh` | `npm install -g @anthropic-ai/claude-code` |
 | **aider** (REPL with diffs) | `./scripts/launch_aider.sh` | `pip install aider-install && aider-install` |
 | **bench** (synthetic load) | `./scripts/launch_bench.sh` | `brew install uv` |
-| **raw HTTP** (anything OpenAI-compatible) | `curl http://127.0.0.1:8000/v1/...` | nothing |
+| **raw HTTP** (OpenAI-compatible) | `curl http://127.0.0.1:8000/v1/chat/completions ...` | nothing |
+| **raw HTTP** (Anthropic Messages API) | `curl http://127.0.0.1:8000/v1/messages ...` | nothing |
 
 All four launch scripts accept the same shape:
 
