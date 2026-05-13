@@ -1,0 +1,6 @@
+services:
+  vllm-metal-proxy:
+    build: .
+    ports:
+      - "127.0.0.1:${HOST_PORT:-18080}:8080"
+    restart: unless-stopped
