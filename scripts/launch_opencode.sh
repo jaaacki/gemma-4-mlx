@@ -1,36 +1,61 @@
 #!/usr/bin/env bash
-# launch_opencode.sh — boot opencode against the local engine.
+# launch_opencode.sh — boot opencode against the local engine, anchored to a project dir.
 #
 # Usage:
-#   scripts/launch_opencode.sh                              # profile=qwen36 (default)
-#   scripts/launch_opencode.sh gemma4                       # different profile
-#   PROFILE=qwen36 scripts/launch_opencode.sh
-#   scripts/launch_opencode.sh qwen36 -- run "do a task"    # args after `--` go to opencode
+#   scripts/launch_opencode.sh                                 # profile=qwen36, project=$PWD
+#   scripts/launch_opencode.sh gemma4                          # different profile
+#   scripts/launch_opencode.sh -C /path/to/project             # explicit project root
+#   scripts/launch_opencode.sh qwen36 -C ~/Dev/myapp           # both
+#   scripts/launch_opencode.sh qwen36 -- run "task..."         # args after `--` go to opencode
+#   PROFILE=gemma4 PROJECT=~/Dev/myapp scripts/launch_opencode.sh
 #
-# Prerequisites:
-#   - opencode installed (npm install -g opencode-ai)
-#   - ~/.config/opencode/opencode.json has the vllm-local provider entry
-#
-# Behavior:
+# What it does:
 #   1. Ensures the engine is running with the requested profile (boots if down).
-#   2. Verifies opencode is on PATH.
-#   3. Exec opencode (any args after `--` are forwarded).
+#   2. Syncs opencode's stored default model to the booted profile (atomic JSON write
+#      against ~/.config/opencode/opencode.json) so requests don't 404.
+#   3. CDs into the project directory, prints where, and exec's opencode.
 
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
-# Parse args: optional first positional = profile name; everything after `--` = opencode args.
 PROFILE="${PROFILE:-qwen36}"
+PROJECT="${PROJECT:-$PWD}"
 OPENCODE_ARGS=()
-if [[ $# -gt 0 && "$1" != "--" ]]; then
-  PROFILE="$1"
-  shift
+
+# Arg parsing: -C DIR / --profile NAME / -- pass-through. Bare first positional = profile.
+saw_positional=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -C|--project)
+      [[ -n "${2:-}" ]] || { echo "launch_opencode: $1 requires a directory" >&2; exit 2; }
+      PROJECT="$2"; shift 2 ;;
+    --profile)
+      [[ -n "${2:-}" ]] || { echo "launch_opencode: --profile requires a name" >&2; exit 2; }
+      PROFILE="$2"; shift 2 ;;
+    -h|--help)
+      sed -n '1,/^set -e/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    --)
+      shift; OPENCODE_ARGS=("$@"); break ;;
+    -*)
+      echo "launch_opencode: unknown flag $1 (use -- to pass flags through to opencode)" >&2
+      exit 2 ;;
+    *)
+      if [[ $saw_positional -eq 0 ]]; then
+        PROFILE="$1"; saw_positional=1; shift
+      else
+        echo "launch_opencode: unexpected positional $1 (put extra args after --)" >&2
+        exit 2
+      fi ;;
+  esac
+done
+
+if [[ ! -d "$PROJECT" ]]; then
+  echo "launch_opencode: project directory does not exist: $PROJECT" >&2
+  exit 2
 fi
-if [[ "${1:-}" == "--" ]]; then
-  shift
-  OPENCODE_ARGS=("$@")
-fi
+PROJECT="$(cd "$PROJECT" && pwd)"
 
 if ! command -v opencode >/dev/null 2>&1; then
   echo "launch_opencode: opencode not found on PATH" >&2
@@ -40,9 +65,7 @@ fi
 
 "$ROOT/scripts/ensure_engine.sh" "$PROFILE"
 
-# Sync opencode's default model to the profile we just booted. Without this,
-# opencode's stored default may point at a model that isn't currently served,
-# and every request returns "model does not exist".
+# Sync opencode's default model to the profile we just booted.
 OPENCODE_CONFIG="${OPENCODE_CONFIG:-$HOME/.config/opencode/opencode.json}"
 if [[ -f "$OPENCODE_CONFIG" ]]; then
   python3 - "$ROOT/deploy/profiles/${PROFILE}.toml" "$OPENCODE_CONFIG" <<'PY'
@@ -58,7 +81,6 @@ target = f"vllm-local/{model_id}"
 with open(opencode_path) as f:
     cfg = json.load(f)
 
-# Ensure provider entry exists; harmless if already set.
 provider = cfg.setdefault("provider", {}).setdefault("vllm-local", {})
 provider.setdefault("npm", "@ai-sdk/openai-compatible")
 provider.setdefault("name", "Local vLLM (Metal)")
@@ -71,8 +93,6 @@ if cfg.get("model") == target and model_id in models:
     sys.exit(0)
 
 cfg["model"] = target
-
-# Atomic write so a Ctrl-C never leaves a half-written config.
 d = os.path.dirname(opencode_path) or "."
 with tempfile.NamedTemporaryFile("w", dir=d, delete=False, suffix=".tmp") as tf:
     json.dump(cfg, tf, indent=2)
@@ -83,7 +103,8 @@ print(f"launch_opencode: opencode default model set to {target}", file=sys.stder
 PY
 fi
 
-echo "launch_opencode: starting opencode (profile=$PROFILE)" >&2
+cd "$PROJECT"
+echo "launch_opencode: project=$PWD profile=$PROFILE" >&2
 if [[ ${#OPENCODE_ARGS[@]} -eq 0 ]]; then
   exec opencode
 else

@@ -1,36 +1,61 @@
 #!/usr/bin/env bash
-# launch_aider.sh — boot aider against the local engine.
+# launch_aider.sh — boot aider against the local engine, anchored to a project dir.
 #
 # Usage:
-#   scripts/launch_aider.sh                                 # profile=qwen36 (default)
+#   scripts/launch_aider.sh                                    # profile=qwen36, project=$PWD
 #   scripts/launch_aider.sh gemma4
-#   scripts/launch_aider.sh qwen36 -- src/main.py           # args after `--` go to aider
+#   scripts/launch_aider.sh -C /path/to/project
+#   scripts/launch_aider.sh qwen36 -C ~/Dev/myapp src/main.py  # files after profile/flags = aider args
+#   scripts/launch_aider.sh qwen36 -- src/main.py              # explicit `--` separator also works
+#   PROFILE=gemma4 PROJECT=~/Dev/myapp scripts/launch_aider.sh
 #
-# Prerequisites:
-#   - aider installed (`python -m pip install aider-install && aider-install`)
-#
-# Behavior:
+# What it does:
 #   1. Ensures the engine is running with the requested profile.
-#   2. Reads the active model ID from the profile TOML.
+#   2. Reads model ID from the profile TOML.
 #   3. Sets OPENAI_API_BASE/OPENAI_API_KEY so aider talks to the engine.
-#   4. Exec aider with the right model and a stable edit format (`whole` is
-#      most reliable with smaller open models; they emit malformed diffs
-#      under the default udiff format).
+#   4. CDs into the project directory, prints where, and exec's aider with
+#      --edit-format whole (most reliable with smaller open models).
 
 set -euo pipefail
 
 ROOT="$(git -C "$(dirname "${BASH_SOURCE[0]}")" rev-parse --show-toplevel)"
 
 PROFILE="${PROFILE:-qwen36}"
+PROJECT="${PROJECT:-$PWD}"
 AIDER_ARGS=()
-if [[ $# -gt 0 && "$1" != "--" ]]; then
-  PROFILE="$1"
-  shift
+
+saw_positional=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    -C|--project)
+      [[ -n "${2:-}" ]] || { echo "launch_aider: $1 requires a directory" >&2; exit 2; }
+      PROJECT="$2"; shift 2 ;;
+    --profile)
+      [[ -n "${2:-}" ]] || { echo "launch_aider: --profile requires a name" >&2; exit 2; }
+      PROFILE="$2"; shift 2 ;;
+    -h|--help)
+      sed -n '1,/^set -e/p' "$0" | grep '^#' | sed 's/^# \{0,1\}//'
+      exit 0 ;;
+    --)
+      shift; AIDER_ARGS=("$@"); break ;;
+    -*)
+      # Treat as an aider passthrough flag; the rest of argv goes to aider.
+      AIDER_ARGS=("$@"); break ;;
+    *)
+      if [[ $saw_positional -eq 0 ]]; then
+        PROFILE="$1"; saw_positional=1; shift
+      else
+        # Remaining positionals are aider's (file arguments).
+        AIDER_ARGS=("$@"); break
+      fi ;;
+  esac
+done
+
+if [[ ! -d "$PROJECT" ]]; then
+  echo "launch_aider: project directory does not exist: $PROJECT" >&2
+  exit 2
 fi
-if [[ "${1:-}" == "--" ]]; then
-  shift
-  AIDER_ARGS=("$@")
-fi
+PROJECT="$(cd "$PROJECT" && pwd)"
 
 if ! command -v aider >/dev/null 2>&1; then
   echo "launch_aider: aider not found on PATH" >&2
@@ -52,7 +77,8 @@ PY
 export OPENAI_API_BASE="http://127.0.0.1:8000/v1"
 export OPENAI_API_KEY="local"
 
-echo "launch_aider: model=openai/$MODEL_ID  edit-format=whole" >&2
+cd "$PROJECT"
+echo "launch_aider: project=$PWD profile=$PROFILE model=openai/$MODEL_ID edit-format=whole" >&2
 if [[ ${#AIDER_ARGS[@]} -eq 0 ]]; then
   exec aider --model "openai/$MODEL_ID" --edit-format whole
 else
