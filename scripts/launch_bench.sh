@@ -66,4 +66,8 @@ DEFAULT_ARGS=(
 )
 
 echo "launch_bench: model=$MODEL_ID" >&2
-exec uv run python -m bench.harness "${DEFAULT_ARGS[@]}" "${EXTRA_ARGS[@]}"
+if [[ ${#EXTRA_ARGS[@]} -eq 0 ]]; then
+  exec uv run python -m bench.harness "${DEFAULT_ARGS[@]}"
+else
+  exec uv run python -m bench.harness "${DEFAULT_ARGS[@]}" "${EXTRA_ARGS[@]}"
+fi

@@ -41,4 +41,8 @@ fi
 "$ROOT/scripts/ensure_engine.sh" "$PROFILE"
 
 echo "launch_opencode: starting opencode (profile=$PROFILE)" >&2
-exec opencode "${OPENCODE_ARGS[@]}"
+if [[ ${#OPENCODE_ARGS[@]} -eq 0 ]]; then
+  exec opencode
+else
+  exec opencode "${OPENCODE_ARGS[@]}"
+fi

@@ -53,7 +53,8 @@ export OPENAI_API_BASE="http://127.0.0.1:8000/v1"
 export OPENAI_API_KEY="local"
 
 echo "launch_aider: model=openai/$MODEL_ID  edit-format=whole" >&2
-exec aider \
-  --model "openai/$MODEL_ID" \
-  --edit-format whole \
-  "${AIDER_ARGS[@]}"
+if [[ ${#AIDER_ARGS[@]} -eq 0 ]]; then
+  exec aider --model "openai/$MODEL_ID" --edit-format whole
+else
+  exec aider --model "openai/$MODEL_ID" --edit-format whole "${AIDER_ARGS[@]}"
+fi
