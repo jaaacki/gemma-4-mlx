@@ -2,11 +2,14 @@ package engine
 
 import (
 	"encoding/json"
+	"io"
+	"log/slog"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -509,6 +512,121 @@ func TestDeriveEndpoint(t *testing.T) {
 				t.Errorf("deriveEndpoint = %q, want %q", got, tc.want)
 			}
 		})
+	}
+}
+
+// TestAcquirePIDLock_Concurrent verifies the EXCL-based PID lock in
+// Start() closes the TOCTOU window: exactly one of N concurrent
+// acquirePIDLock attempts wins; the rest report "already running" or
+// "boot already in progress".
+//
+// We exercise the lock directly (not Engine.Start, which would try to
+// exec vllm), since the lock is the part doing the race-safety work.
+func TestAcquirePIDLock_Concurrent(t *testing.T) {
+	root := t.TempDir()
+	e := New(root)
+	if err := os.MkdirAll(e.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir state: %v", err)
+	}
+
+	const N = 5
+	type result struct {
+		err error
+	}
+	var wg sync.WaitGroup
+	results := make(chan result, N)
+	start := make(chan struct{})
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	for i := 0; i < N; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			err := e.acquirePIDLock(logger)
+			results <- result{err: err}
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+
+	wins := 0
+	losses := 0
+	for r := range results {
+		if r.err == nil {
+			wins++
+		} else {
+			losses++
+			// Loss reason must be either "already running" or
+			// "boot already in progress" — never some unrelated I/O error.
+			msg := r.err.Error()
+			if !strings.Contains(msg, "already running") &&
+				!strings.Contains(msg, "boot already in progress") {
+				t.Errorf("unexpected loss error: %v", r.err)
+			}
+		}
+	}
+	if wins != 1 {
+		t.Errorf("expected exactly 1 winner, got %d (losses=%d)", wins, losses)
+	}
+	if losses != N-1 {
+		t.Errorf("expected %d losers, got %d", N-1, losses)
+	}
+
+	// The PID file should exist after the winning acquire, containing
+	// the placeholder rather than a parseable PID.
+	b, err := os.ReadFile(e.pidFilePath())
+	if err != nil {
+		t.Fatalf("read pid file: %v", err)
+	}
+	if !strings.HasPrefix(string(b), "starting") {
+		t.Errorf("pid file should contain 'starting' placeholder, got %q", string(b))
+	}
+}
+
+// TestAcquirePIDLock_StaleFileRecovers: a stale PID file (dead PID) must
+// be cleared and the lock should be acquired on the retry.
+func TestAcquirePIDLock_StaleFileRecovers(t *testing.T) {
+	root := t.TempDir()
+	e := New(root)
+	if err := os.MkdirAll(e.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	deadPID := spawnAndReap(t)
+	if err := os.WriteFile(e.pidFilePath(), []byte(strconv.Itoa(deadPID)), 0o644); err != nil {
+		t.Fatalf("write stale pid: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	if err := e.acquirePIDLock(logger); err != nil {
+		t.Fatalf("acquirePIDLock with stale file: %v", err)
+	}
+	// After acquire, the file should hold the placeholder, not the
+	// dead pid.
+	b, _ := os.ReadFile(e.pidFilePath())
+	if !strings.HasPrefix(string(b), "starting") {
+		t.Errorf("after stale recovery want placeholder, got %q", string(b))
+	}
+}
+
+// TestAcquirePIDLock_LivePIDRefuses: a PID file pointing to a live process
+// must cause acquire to fail with "already running".
+func TestAcquirePIDLock_LivePIDRefuses(t *testing.T) {
+	root := t.TempDir()
+	e := New(root)
+	if err := os.MkdirAll(e.StateDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	self := os.Getpid()
+	if err := os.WriteFile(e.pidFilePath(), []byte(strconv.Itoa(self)), 0o644); err != nil {
+		t.Fatalf("write pid: %v", err)
+	}
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	err := e.acquirePIDLock(logger)
+	if err == nil {
+		t.Fatal("acquirePIDLock should have refused a live PID")
+	}
+	if !strings.Contains(err.Error(), "already running") {
+		t.Errorf("want 'already running', got %v", err)
 	}
 }
 

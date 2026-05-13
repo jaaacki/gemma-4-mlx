@@ -34,9 +34,10 @@ func runBoot(cmd *cobra.Command, args []string) error {
 	}
 
 	eng := engine.New(rootOpts.root)
-	if running, pid := eng.IsRunning(); running {
-		return fmt.Errorf("engine already running (pid=%d); run `forge stop` first", pid)
-	}
+	// Note: Engine.Start() now owns the "already running" check via its
+	// EXCL PID-lock, which closes the TOCTOU race between two concurrent
+	// `forge boot` invocations. A redundant IsRunning() check here would
+	// just race against the same window.
 
 	slog.Info("boot: starting engine", "model", p.ModelID())
 	if err := eng.Start(p, nil); err != nil {
@@ -55,5 +56,10 @@ func runBoot(cmd *cobra.Command, args []string) error {
 		"endpoint", st.Endpoint,
 		"log_file", st.LogFile,
 	)
+	// Major 7: also emit a one-line summary on stdout so shell pipelines
+	// (e.g. `forge boot qwen36 | grep endpoint`) can grep for it. slog
+	// writes to stderr by default, leaving stdout empty otherwise.
+	fmt.Fprintf(cmd.OutOrStdout(), "started pid=%d model=%s endpoint=%s\n",
+		st.PID, st.Model, st.Endpoint)
 	return nil
 }

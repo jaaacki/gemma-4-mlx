@@ -96,34 +96,41 @@ func (e *Engine) Start(p *profile.Profile, extraEnv map[string]string) error {
 		return errors.New("starting engine: profile is nil")
 	}
 
-	// 1. Refuse to start if an engine is already running. A stale PID
-	//    file (PID present but process dead) is silently cleared.
-	if running, pid := e.IsRunning(); running {
-		log.Warn("engine already running", "pid", pid)
-		return fmt.Errorf("engine already running (pid=%d)", pid)
+	// 1. Ensure StateDir exists (mkdir -p semantics) — must precede the
+	//    EXCL lock dance because we'll create the PID file inside it.
+	if err := os.MkdirAll(e.StateDir, 0o755); err != nil {
+		return fmt.Errorf("starting engine: creating state dir: %w", err)
 	}
-	if _, err := os.Stat(e.pidFilePath()); err == nil {
-		// Stale PID file — IsRunning returned false but the file exists.
-		log.Info("removing stale pid file", "path", e.pidFilePath())
-		if err := os.Remove(e.pidFilePath()); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("removing stale pid file: %w", err)
+
+	// 2. Acquire an exclusive lock by O_CREATE|O_EXCL on the PID file.
+	//    This closes the TOCTOU window between IsRunning() and the actual
+	//    spawn: two concurrent Start() calls cannot both win the create.
+	//    The placeholder "starting" string is written so a concurrent
+	//    reader (e.g. forge status, IsRunning) sees the file as malformed
+	//    rather than parseable — which keeps it from reporting a bogus PID.
+	if err := e.acquirePIDLock(log); err != nil {
+		return err
+	}
+
+	// If anything below fails before we've spawned vllm successfully, the
+	// placeholder PID file must be removed so the next Start() can proceed.
+	pidLockCleanup := func() {
+		if rmErr := os.Remove(e.pidFilePath()); rmErr != nil && !os.IsNotExist(rmErr) {
+			log.Warn("failed to remove pid lock after start failure", "err", rmErr)
 		}
 	}
 
-	// 2. Ensure the venv exists. We launch vllm via its absolute path so
+	// 3. Ensure the venv exists. We launch vllm via its absolute path so
 	//    we don't need to "source activate"; just verifying the dir is
 	//    enough.
 	if _, err := os.Stat(e.VenvPath); err != nil {
+		pidLockCleanup()
 		return fmt.Errorf("starting engine: venv not found at %s: %w", e.VenvPath, err)
 	}
 	vllmBin := e.vllmBinPath()
 	if _, err := os.Stat(vllmBin); err != nil {
+		pidLockCleanup()
 		return fmt.Errorf("starting engine: vllm binary not found at %s: %w", vllmBin, err)
-	}
-
-	// 3. Ensure StateDir exists (mkdir -p semantics).
-	if err := os.MkdirAll(e.StateDir, 0o755); err != nil {
-		return fmt.Errorf("starting engine: creating state dir: %w", err)
 	}
 
 	// 4. Open the log file for append so each boot's output is preserved
@@ -131,6 +138,7 @@ func (e *Engine) Start(p *profile.Profile, extraEnv map[string]string) error {
 	//    truncate.
 	logFile, err := os.OpenFile(e.logFilePath(), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o644)
 	if err != nil {
+		pidLockCleanup()
 		return fmt.Errorf("starting engine: opening log file: %w", err)
 	}
 	// We pass logFile to cmd.Stdout/Stderr; the child will inherit the
@@ -164,14 +172,17 @@ func (e *Engine) Start(p *profile.Profile, extraEnv map[string]string) error {
 	//    does NOT wait for the child to exit. We never call cmd.Wait()
 	//    in this process — the subprocess is meant to outlive us.
 	if err := cmd.Start(); err != nil {
+		pidLockCleanup()
 		return fmt.Errorf("starting engine: spawning vllm: %w", err)
 	}
 	pid := cmd.Process.Pid
 
-	// 10. Persist PID atomically. If this fails after we've spawned, we
-	//     try to kill the orphan so we don't leak a vllm we can't track.
+	// 10. Persist PID atomically, overwriting the placeholder via tmp+rename.
+	//     If this fails after we've spawned, we try to kill the orphan so
+	//     we don't leak a vllm we can't track.
 	if err := atomicWrite(e.pidFilePath(), []byte(strconv.Itoa(pid)+"\n"), 0o644); err != nil {
-		_ = syscall.Kill(-pid, syscall.SIGTERM)
+		_ = killProcess(pid, syscall.SIGTERM)
+		pidLockCleanup()
 		return fmt.Errorf("starting engine: writing pid file: %w", err)
 	}
 
@@ -235,10 +246,14 @@ func (e *Engine) Stop() error {
 		return nil
 	}
 
-	// SIGTERM the process group (note the negative pid).
-	log.Info("sending SIGTERM to process group", "pid", pid)
-	if err := syscall.Kill(-pid, syscall.SIGTERM); err != nil {
-		// ESRCH means the group already exited between our check and
+	// SIGTERM the process. killProcess prefers PGID kill (forge-spawned
+	// engines are group leaders, so -pid reaches the whole vllm tree),
+	// but falls back to per-PID kill for engines started by the legacy
+	// shell scripts (scripts/use_*.sh + nohup), where vllm is not a
+	// group leader and -pid would silently ESRCH.
+	log.Info("sending SIGTERM", "pid", pid)
+	if err := e.killProcess(pid, syscall.SIGTERM); err != nil {
+		// ESRCH means the process already exited between our check and
 		// the kill — that's a benign race, just clean up.
 		if !errors.Is(err, syscall.ESRCH) {
 			return fmt.Errorf("stopping engine: SIGTERM pid=%d: %w", pid, err)
@@ -258,8 +273,23 @@ func (e *Engine) Stop() error {
 	if processAlive(pid) {
 		log.Warn("process did not exit within grace period; sending SIGKILL",
 			"pid", pid, "grace", stopGracePeriod)
-		if err := syscall.Kill(-pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		if err := e.killProcess(pid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 			return fmt.Errorf("stopping engine: SIGKILL pid=%d: %w", pid, err)
+		}
+		// Poll up to 2 s after SIGKILL: even with SIGKILL, vLLM Metal can
+		// take a moment to release Metal/MLX resources and the kernel takes
+		// non-zero time to reap. If the pid is still alive after that, the
+		// port may still be held — surface the failure to the caller instead
+		// of silently removing the PID file.
+		killDeadline := time.Now().Add(2 * time.Second)
+		for time.Now().Before(killDeadline) {
+			if !processAlive(pid) {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+		if processAlive(pid) {
+			return fmt.Errorf("engine stop: SIGKILL sent but pid %d still alive after 2s", pid)
 		}
 	}
 
@@ -399,6 +429,110 @@ func readPIDFile(path string) (int, error) {
 		return 0, errMalformedPIDFile
 	}
 	return pid, nil
+}
+
+// pidLockPlaceholder is what we write into a freshly EXCL-created PID file
+// before vllm has been spawned. It deliberately doesn't parse as a number,
+// so readers via readPIDFile see errMalformedPIDFile (treated as "not
+// running") rather than mistaking the lock for a real PID.
+const pidLockPlaceholder = "starting\n"
+
+// acquirePIDLock atomically creates the PID file via O_CREATE|O_EXCL. This
+// is the lock that closes the TOCTOU race between two concurrent Start()
+// invocations.
+//
+// Outcomes:
+//   - EXCL succeeds → caller owns the lock, must remove on failure or
+//     overwrite with the real PID on success.
+//   - EEXIST + existing PID is a live process → return "already running".
+//   - EEXIST + existing PID file is malformed or dead → unlink and retry
+//     ONCE. A second EEXIST means another Start() raced us between our
+//     unlink and our retry — return "boot already in progress".
+func (e *Engine) acquirePIDLock(log *slog.Logger) error {
+	for attempt := 0; attempt < 2; attempt++ {
+		f, err := os.OpenFile(e.pidFilePath(),
+			os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			_, werr := f.WriteString(pidLockPlaceholder)
+			cerr := f.Close()
+			if werr != nil {
+				_ = os.Remove(e.pidFilePath())
+				return fmt.Errorf("starting engine: writing pid lock placeholder: %w", werr)
+			}
+			if cerr != nil {
+				_ = os.Remove(e.pidFilePath())
+				return fmt.Errorf("starting engine: closing pid lock: %w", cerr)
+			}
+			return nil
+		}
+		if !errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("starting engine: opening pid lock: %w", err)
+		}
+
+		// EEXIST. Inspect what's there.
+		//
+		// Three possible contents:
+		//
+		//  1) A live PID — a real engine is running. Refuse.
+		//  2) A dead-but-parseable PID — leftover from a crashed engine
+		//     that didn't clean its PID file. Safe to clear and retry.
+		//  3) The literal "starting" placeholder — ANOTHER Start() just
+		//     won the EXCL race and is mid-boot. We must NOT clear this,
+		//     because doing so would corrupt their lock and let two
+		//     concurrent boots through (the original TOCTOU bug).
+		//
+		// readPIDFile returns errMalformedPIDFile for "starting", so we
+		// treat malformed contents as case (3) and refuse — leaving the
+		// other Start() in charge.
+		existingPID, perr := readPIDFile(e.pidFilePath())
+		if perr == nil && processAlive(existingPID) {
+			return fmt.Errorf("engine already running (pid=%d)", existingPID)
+		}
+		if perr != nil {
+			// Malformed contents == another Start() holds the lock.
+			// Surface as a race, don't clear it.
+			return errors.New("engine boot already in progress, try again")
+		}
+		// Parseable PID but dead — case (2). Clear and retry.
+		if attempt == 0 {
+			log.Info("removing stale pid file before retry",
+				"path", e.pidFilePath(), "stale_pid", existingPID)
+			if rmErr := os.Remove(e.pidFilePath()); rmErr != nil && !os.IsNotExist(rmErr) {
+				return fmt.Errorf("starting engine: removing stale pid file: %w", rmErr)
+			}
+			continue
+		}
+		// Second EEXIST after clearing a stale PID → someone else won
+		// the retry race. Don't loop forever; surface it.
+		return errors.New("engine boot already in progress, try again")
+	}
+	return errors.New("starting engine: pid lock retries exhausted")
+}
+
+// killProcess sends sig to pid, preferring a process-group kill when pid
+// is itself the group leader (the case for forge-spawned engines, which
+// set Setpgid=true in SysProcAttr). When pid is NOT a group leader — the
+// case for engines booted by the legacy scripts/use_*.sh wrappers, where
+// `nohup vllm &` leaves vllm as a child of the original shell's pgrp —
+// PGID-based kill via -pid would either ESRCH or miss the target entirely.
+// In that case we fall back to a per-PID signal so forge stop can still
+// terminate a shell-spawned engine cleanly.
+func killProcess(pid int, sig syscall.Signal) error {
+	pgid, err := syscall.Getpgid(pid)
+	if err == nil && pgid == pid {
+		if killErr := syscall.Kill(-pid, sig); killErr == nil {
+			return nil
+		}
+		// Group kill failed (e.g., transient race during teardown); fall
+		// through to per-PID signaling as a last-resort.
+	}
+	return syscall.Kill(pid, sig)
+}
+
+// killProcess is exposed as a method so callers/tests can stub it via the
+// Engine receiver if needed. The free function above does the real work.
+func (e *Engine) killProcess(pid int, sig syscall.Signal) error {
+	return killProcess(pid, sig)
 }
 
 // processAlive returns true iff kill(pid, 0) succeeds — i.e. the process

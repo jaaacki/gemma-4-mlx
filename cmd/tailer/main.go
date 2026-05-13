@@ -39,7 +39,10 @@ type config struct {
 
 func parseFlags(args []string) (config, error) {
 	fs := flag.NewFlagSet("tailer", flag.ContinueOnError)
-	fs.SetOutput(io.Discard) // we print our own usage on error
+	// Discard library output by default — we surface errors via our own
+	// slog handler. On --help we re-enable stderr (see below) so the
+	// generated usage actually reaches the operator.
+	fs.SetOutput(io.Discard)
 
 	var cfg config
 	fs.StringVar(&cfg.logPath, "log-path", "state/nginx-access.log", "path to nginx JSON access log")
@@ -48,6 +51,17 @@ func parseFlags(args []string) (config, error) {
 	fs.DurationVar(&cfg.batchInterval, "batch-interval", time.Second, "flush at least this often even if batch-size not reached")
 
 	if err := fs.Parse(args); err != nil {
+		// flag.ErrHelp means the user passed -h/--help. Treat that as a
+		// successful "usage requested" path: print usage to stderr (the
+		// flag package's conventional destination) and exit 0 from main.
+		// Without this special-case, --help degraded into the generic
+		// "invalid flags" error and exited non-zero.
+		if errors.Is(err, flag.ErrHelp) {
+			fs.SetOutput(os.Stderr)
+			fmt.Fprintf(os.Stderr, "Usage of tailer:\n")
+			fs.PrintDefaults()
+			os.Exit(0)
+		}
 		return cfg, fmt.Errorf("parse flags: %w", err)
 	}
 	if cfg.batchSize < 1 {
@@ -114,6 +128,13 @@ func run(cfg config, logger *slog.Logger) error {
 		ReOpen:    true,
 		Follow:    true,
 		MustExist: true,
+		// Poll: true forces polling instead of the default fsnotify/kqueue
+		// path. On macOS, kqueue does not reliably deliver rename+create
+		// events for log rotation (nginx logrotate does mv old new ;
+		// nginx reopens), and we observed dropped records on rotation in
+		// testing. Polling is slightly less efficient but reliable across
+		// the rotation boundary.
+		Poll: true,
 		// Start at end-of-file so a restart doesn't replay history.
 		Location: &tail.SeekInfo{Offset: 0, Whence: io.SeekEnd},
 		// We do our own logging.

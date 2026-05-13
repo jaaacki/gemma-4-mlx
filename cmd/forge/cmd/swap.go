@@ -66,5 +66,9 @@ func runSwap(cmd *cobra.Command, args []string) error {
 		"model", st.Model,
 		"endpoint", st.Endpoint,
 	)
+	// Major 7: also emit a one-line summary on stdout so shell pipelines
+	// can grep for the swap result. slog goes to stderr by default.
+	fmt.Fprintf(cmd.OutOrStdout(), "swapped pid=%d model=%s endpoint=%s\n",
+		st.PID, st.Model, st.Endpoint)
 	return nil
 }

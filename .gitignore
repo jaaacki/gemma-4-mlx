@@ -2,9 +2,8 @@
 **/.venv/
 .uv-cache/
 bin/
-state/*.log
-state/*.pid
-state/*.json
+state/**
+!state/.gitkeep
 bench/results/*.jsonl
 bench/results/*.json
 .DS_Store
